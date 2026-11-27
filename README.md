@@ -11,7 +11,7 @@
 
 *Developed by **[znraznra](https://github.com/znraznra)** · Project **`decant`** · Package `com.znraznra.decant`*
 
-[About](#-about-decant) · [Features](#-features) · [How to Play](#-how-to-play) · [Transfer Progress](#-how-to-transfer-progress) · [Installation & APK](#-installation--getting-a-clean-apk) · [Build from Source](#-build-from-source)
+[About](#-about-decant) · [Features](#-features) · [How to Play](#-how-to-play) · [Transfer Progress](#-how-to-transfer-progress) · [Download & Install](#-download--installation) · [Build from Source](#-build-from-source)
 
 </div>
 
@@ -65,24 +65,18 @@
 
 ---
 
-## 📦 Installation & Getting a Clean APK
+## 📦 Download & Installation
 
-### Option 1 — Download from AI Studio
+> [!IMPORTANT]
+> **Official Distribution Disclaimer:** There is **no other place to download Decant!** besides this official GitHub repository (`https://github.com/znraznra/decant`). It is not distributed on external app stores or third-party APK mirrors—only download releases directly from this repository's **GitHub Releases** page.
 
-1. Open the **Settings (⚙️)** menu in the AI Studio workspace toolbar.
-2. Choose **Generate APK / AAB** (or **Build APK**).
-3. Wait for the cloud Gradle build to finish, then download the clean `.apk` file to your computer or phone.
+### Download via GitHub Releases
 
-### Option 2 — Install on Your Android Device (Sideload)
-
-1. Copy the downloaded APK (`app-debug.apk` or your signed release APK) to your Android phone (USB, Quick Share, or cloud drive).
-2. Open the **Files** app on your Android device and tap the `.apk` file.
-3. If prompted, enable **Allow from this source** under Android's *Install unknown apps* prompt.
-4. Tap **Install** — Android verifies **Decant!** (`com.znraznra.decant`) and adds it to your app drawer with zero permissions required.
-
-### Option 3 — Download from GitHub Releases
-
-Grab the latest pre-built APK from the [Releases](https://github.com/znraznra/decant/releases) page of [`znraznra/decant`](https://github.com/znraznra/decant) and follow Option 2 above.
+1. Open the [**Releases**](https://github.com/znraznra/decant/releases) page of [`znraznra/decant`](https://github.com/znraznra/decant).
+2. Download the latest `.apk` asset attached to the release onto your Android device.
+3. Open your phone's **Files** app and tap the downloaded `.apk` file.
+4. If prompted by Android, enable **Allow from this source** under *Install unknown apps*.
+5. Tap **Install** — Android verifies **Decant!** (`com.znraznra.decant`) and installs it with zero permissions required to play.
 
 ---
 
@@ -99,7 +93,7 @@ Grab the latest pre-built APK from the [Releases](https://github.com/znraznra/de
 git clone https://github.com/znraznra/decant.git
 cd decant
 
-# 2. Run all JVM & Robolectric unit tests
+# 2. Run all JVM unit tests
 ./gradlew :app:testDebugUnitTest
 
 # 3. Assemble a clean debug APK
