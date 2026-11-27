@@ -18,15 +18,30 @@ import kotlin.math.PI
 import kotlin.math.exp
 import kotlin.math.sin
 
+enum class SoundClip {
+    TUBE_SELECT,
+    TUBE_POUR,
+    COLOR_MIX,
+    UNDO,
+    INVALID_MOVE,
+    LEVEL_COMPLETE
+}
+
 interface SoundFeedback {
     fun playSelect(soundEnabled: Boolean, hapticsEnabled: Boolean)
     fun playPour(fillRatio: Float, soundEnabled: Boolean, hapticsEnabled: Boolean)
+    fun playColorMix(colorId: Int, units: Int, soundEnabled: Boolean, hapticsEnabled: Boolean)
     fun playUndo(soundEnabled: Boolean, hapticsEnabled: Boolean)
     fun playError(soundEnabled: Boolean, hapticsEnabled: Boolean)
-    fun playVictory(soundEnabled: Boolean, hapticsEnabled: Boolean)
+    fun playLevelComplete(soundEnabled: Boolean, hapticsEnabled: Boolean)
 }
 
-class SoundFeedbackEngine(private val context: Context) : SoundFeedback {
+/**
+ * Lightweight PCM SoundManager + tactile haptics engine.
+ * Lazily synthesizes compact audio clips (< 90 KB total RAM) for tube pouring,
+ * liquid color mixing, and level completion with zero external audio file bloat.
+ */
+class SoundManager(private val context: Context) : SoundFeedback {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -52,14 +67,20 @@ class SoundFeedbackEngine(private val context: Context) : SoundFeedback {
         synthesizeChime(freqStart = 210.0, freqEnd = 155.0, durationMs = 90, gain = 0.24)
     }
 
-    private val victoryBuffer: ShortArray by lazy {
-        synthesizeVictoryArpeggio()
+    private val levelCompleteBuffer: ShortArray by lazy {
+        synthesizeLevelCompleteClip()
     }
 
     private val pourBuffers: Array<ShortArray> by lazy {
         Array(4) { step ->
             val ratio = (step + 1) / 4.0
-            synthesizePourBubble(baseFreq = 320.0 + ratio * 260.0, durationMs = 195)
+            synthesizePourClip(baseFreq = 320.0 + ratio * 260.0, durationMs = 195)
+        }
+    }
+
+    private val colorMixBuffers: Array<ShortArray> by lazy {
+        Array(4) { variant ->
+            synthesizeColorMixClip(colorVariant = variant, durationMs = 145)
         }
     }
 
@@ -87,7 +108,7 @@ class SoundFeedbackEngine(private val context: Context) : SoundFeedback {
             )
         }
         if (!soundEnabled) return
-        scope.launch { playToneBuffer(selectBuffer) }
+        scope.launch { playClipBuffer(selectBuffer) }
     }
 
     override fun playPour(fillRatio: Float, soundEnabled: Boolean, hapticsEnabled: Boolean) {
@@ -97,7 +118,22 @@ class SoundFeedbackEngine(private val context: Context) : SoundFeedback {
         if (!soundEnabled) return
         val bucket = ((fillRatio.coerceIn(0f, 1f) * 3f).toInt()).coerceIn(0, 3)
         scope.launch {
-            playToneBuffer(pourBuffers[bucket])
+            playClipBuffer(pourBuffers[bucket])
+        }
+    }
+
+    override fun playColorMix(colorId: Int, units: Int, soundEnabled: Boolean, hapticsEnabled: Boolean) {
+        if (hapticsEnabled) {
+            vibratePredefinedOrTick(
+                predefinedId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) VibrationEffect.EFFECT_TICK else -1,
+                fallbackDurationMs = (12L + units * 4L).coerceAtMost(28L),
+                fallbackAmplitude = (85 + units * 15).coerceAtMost(145)
+            )
+        }
+        if (!soundEnabled) return
+        val bucket = (colorId.coerceAtLeast(0) % colorMixBuffers.size)
+        scope.launch {
+            playClipBuffer(colorMixBuffers[bucket])
         }
     }
 
@@ -110,19 +146,19 @@ class SoundFeedbackEngine(private val context: Context) : SoundFeedback {
             )
         }
         if (!soundEnabled) return
-        scope.launch { playToneBuffer(undoBuffer) }
+        scope.launch { playClipBuffer(undoBuffer) }
     }
 
     override fun playError(soundEnabled: Boolean, hapticsEnabled: Boolean) {
         if (hapticsEnabled) vibrateDoubleThud()
         if (!soundEnabled) return
-        scope.launch { playToneBuffer(errorBuffer) }
+        scope.launch { playClipBuffer(errorBuffer) }
     }
 
-    override fun playVictory(soundEnabled: Boolean, hapticsEnabled: Boolean) {
+    override fun playLevelComplete(soundEnabled: Boolean, hapticsEnabled: Boolean) {
         if (hapticsEnabled) vibrateVictoryFanfare()
         if (!soundEnabled) return
-        scope.launch { playToneBuffer(victoryBuffer) }
+        scope.launch { playClipBuffer(levelCompleteBuffer) }
     }
 
     private fun vibratePredefinedOrTick(
@@ -203,7 +239,7 @@ class SoundFeedbackEngine(private val context: Context) : SoundFeedback {
         }
     }
 
-    private suspend fun playToneBuffer(samples: ShortArray) {
+    private suspend fun playClipBuffer(samples: ShortArray) {
         if (samples.isEmpty()) return
         var track: AudioTrack? = null
         try {
@@ -224,12 +260,8 @@ class SoundFeedbackEngine(private val context: Context) : SoundFeedback {
         } catch (_: Throwable) {
             // Gracefully ignore audio hardware unavailability on headless/muted devices
         } finally {
-            runCatching {
-                track?.stop()
-            }
-            runCatching {
-                track?.release()
-            }
+            runCatching { track?.stop() }
+            runCatching { track?.release() }
         }
     }
 
@@ -260,7 +292,7 @@ class SoundFeedbackEngine(private val context: Context) : SoundFeedback {
         }
 
         @VisibleForTesting
-        fun synthesizePourBubble(baseFreq: Double, durationMs: Int): ShortArray {
+        fun synthesizePourClip(baseFreq: Double, durationMs: Int): ShortArray {
             val numSamples = (SAMPLE_RATE * durationMs) / 1000
             val out = ShortArray(numSamples)
             var phase = 0.0
@@ -279,7 +311,30 @@ class SoundFeedbackEngine(private val context: Context) : SoundFeedback {
         }
 
         @VisibleForTesting
-        fun synthesizeVictoryArpeggio(): ShortArray {
+        fun synthesizeColorMixClip(colorVariant: Int, durationMs: Int = 145): ShortArray {
+            val numSamples = (SAMPLE_RATE * durationMs) / 1000
+            val out = ShortArray(numSamples)
+            val rootFreq = 587.33 + (colorVariant.coerceIn(0, 3) * 55.0)
+            val harmonicFreq = rootFreq * 1.498 // Warm fifth blend
+            var phaseA = 0.0
+            var phaseB = 0.0
+            for (i in 0 until numSamples) {
+                val t = i.toDouble() / numSamples
+                val swirl = sin(2.0 * PI * 9.0 * t) * 18.0
+                phaseA += 2.0 * PI * (rootFreq + swirl) / SAMPLE_RATE
+                phaseB += 2.0 * PI * (harmonicFreq + 90.0 * t) / SAMPLE_RATE
+                val attack = (t / 0.12).coerceAtMost(1.0)
+                val env = attack * exp(-3.4 * t)
+                val sample = (0.58 * sin(phaseA) + 0.42 * sin(phaseB)) * env * 0.26
+                out[i] = (sample * Short.MAX_VALUE).toInt()
+                    .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+                    .toShort()
+            }
+            return out
+        }
+
+        @VisibleForTesting
+        fun synthesizeLevelCompleteClip(): ShortArray {
             val notes = doubleArrayOf(523.25, 659.25, 783.99, 1046.50) // C5, E5, G5, C6
             val noteSamples = (SAMPLE_RATE * 110) / 1000
             val total = noteSamples * notes.size

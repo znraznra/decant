@@ -11,9 +11,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
     entities = [
         LevelProgressEntity::class,
         ActiveSessionEntity::class,
-        DailyChallengeEntity::class
+        DailyChallengeEntity::class,
+        DifficultyRecordEntity::class
     ],
-    version = 4,
+    version = 5,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -61,6 +62,25 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE level_progress ADD COLUMN bestTimeMs INTEGER")
+                db.execSQL("ALTER TABLE active_session ADD COLUMN elapsedTimeMs INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE daily_challenges ADD COLUMN elapsedTimeMs INTEGER NOT NULL DEFAULT 0")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `tier_records` (
+                        `tierOrdinal` INTEGER NOT NULL,
+                        `bestTimeMs` INTEGER NOT NULL,
+                        `bestLevelNumber` INTEGER NOT NULL,
+                        `updatedAtMs` INTEGER NOT NULL,
+                        PRIMARY KEY(`tierOrdinal`)
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -68,7 +88,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "chromaflow_offline.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                     .build()
                     .also { INSTANCE = it }
             }

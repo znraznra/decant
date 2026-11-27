@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<data-extraction-rules>
+    <cloud-backup>
+        <include domain="database" path="chromaflow_offline.db" />
+        <include domain="database" path="chromaflow_offline.db-wal" />
+        <include domain="database" path="chromaflow_offline.db-shm" />
+        <include domain="file" path="datastore/chromaflow_prefs.preferences_pb" />
+    </cloud-backup>
+    <device-transfer>
+        <include domain="database" path="chromaflow_offline.db" />
+        <include domain="database" path="chromaflow_offline.db-wal" />
+        <include domain="database" path="chromaflow_offline.db-shm" />
+        <include domain="file" path="datastore/chromaflow_prefs.preferences_pb" />
+    </device-transfer>
+</data-extraction-rules>

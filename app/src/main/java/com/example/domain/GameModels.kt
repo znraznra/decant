@@ -90,20 +90,104 @@ data class DailyChallengeSpec(
 )
 
 @Serializable
-data class CloudSavePayload(
+data class BackupActiveSession(
+    val currentLevel: Int,
+    val themeOrdinal: Int,
+    val tubesJson: String,
+    val initialTubesJson: String = "",
+    val undoStackJson: String,
+    val remainingUndos: Int = MAX_UNDO_PER_STAGE,
+    val extraTubeUsed: Boolean,
+    val moveCount: Int,
+    val updatedAtMs: Long = 0L,
+    val elapsedTimeMs: Long = 0L
+)
+
+@Serializable
+data class BackupDailyChallenge(
+    val dateKey: String,
+    val tierOrdinal: Int,
+    val colorCount: Int,
+    val themeOrdinal: Int,
+    val initialTubesJson: String,
+    val currentTubesJson: String,
+    val undoStackJson: String,
+    val remainingUndos: Int = MAX_UNDO_PER_STAGE,
+    val extraTubeUsed: Boolean = false,
+    val moveCount: Int = 0,
+    val isCompleted: Boolean = false,
+    val bestMoves: Int? = null,
+    val completedAtMs: Long? = null,
+    val updatedAtMs: Long = 0L,
+    val elapsedTimeMs: Long = 0L
+)
+
+@Serializable
+data class ProgressTransferPayload(
+    val schemaVersion: Int = 2,
+    val appId: String = "decant",
     val highestUnlockedLevel: Int = 1,
     val completedLevels: Map<Int, Int> = emptyMap(),
     val completedDailyMoves: Map<String, Int> = emptyMap(),
-    val updatedAtMs: Long = 0L
+    val bestLevelTimes: Map<Int, Long> = emptyMap(),
+    val bestTierTimes: Map<Int, Long> = emptyMap(),
+    val activeSession: BackupActiveSession? = null,
+    val dailyChallenges: List<BackupDailyChallenge> = emptyList(),
+    val soundEnabled: Boolean = true,
+    val hapticsEnabled: Boolean = true,
+    val colorblindEnabled: Boolean = false,
+    val randomizeThemePerLevel: Boolean = true,
+    val timerEnabled: Boolean = true,
+    val pinnedThemeOrdinal: Int = 0,
+    val exportedAtMs: Long = 0L
 )
 
-sealed interface SyncStatus {
-    data object Disabled : SyncStatus
-    data object NeedsAppId : SyncStatus
-    data object SignedOut : SyncStatus
-    data object Syncing : SyncStatus
-    data class Synced(val lastSyncMs: Long) : SyncStatus
-    data class Error(val message: String) : SyncStatus
+data class LevelCompletionResult(
+    val isNewBestMoves: Boolean,
+    val isNewBestTime: Boolean = false,
+    val bestTierTimeMs: Long? = null
+)
+
+fun formatElapsedDuration(ms: Long): String {
+    val totalSeconds = (ms.coerceAtLeast(0L) / 1000L)
+    val hours = totalSeconds / 3600L
+    val minutes = (totalSeconds % 3600L) / 60L
+    val seconds = totalSeconds % 60L
+    return if (hours > 0L) {
+        "%d:%02d:%02d".format(hours, minutes, seconds)
+    } else {
+        "%d:%02d".format(minutes, seconds)
+    }
+}
+
+data class ImportSummary(
+    val newLevelsAdded: Int,
+    val newDailyAdded: Int,
+    val highestUnlockedLevel: Int,
+    val restoredActiveSession: Boolean = false
+)
+
+enum class TransferTransport(val label: String) {
+    WIFI_LOCAL("Local Wi-Fi"),
+    BLUETOOTH("Bluetooth")
+}
+
+data class DiscoveredPeer(
+    val id: String,
+    val name: String,
+    val transport: TransferTransport,
+    val host: String? = null,
+    val port: Int = 0,
+    val bluetoothAddress: String? = null
+)
+
+sealed interface TransferUiState {
+    data object Idle : TransferUiState
+    data class Discovering(val transport: TransferTransport) : TransferUiState
+    data class WaitingToReceive(val transport: TransferTransport, val deviceName: String) : TransferUiState
+    data class Transferring(val label: String) : TransferUiState
+    data class Success(val message: String) : TransferUiState
+    data class Error(val message: String) : TransferUiState
 }
 
 data class DailyChallengeCardSummary(

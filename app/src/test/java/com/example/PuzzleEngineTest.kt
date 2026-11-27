@@ -1,8 +1,10 @@
 package com.example
 
-import com.example.data.cloud.PlayGamesSaveManager
-import com.example.domain.CloudSavePayload
+import com.example.data.transfer.ProgressTransferCodec
+import com.example.domain.BackupActiveSession
+import com.example.domain.BackupDailyChallenge
 import com.example.domain.DifficultyTier
+import com.example.domain.ProgressTransferPayload
 import com.example.domain.PuzzleEngine
 import com.example.domain.TUBE_CAPACITY
 import org.junit.Assert.assertEquals
@@ -114,26 +116,61 @@ class PuzzleEngineTest {
     }
 
     @Test
-    fun playGamesMerge_combinesLevelsAndDailyProgressSafely() {
-        val local = CloudSavePayload(
+    fun progressTransferCodec_roundTripsAndMergesSafely() {
+        val local = ProgressTransferPayload(
             highestUnlockedLevel = 4,
             completedLevels = mapOf(1 to 8, 2 to 14),
             completedDailyMoves = mapOf("2026-11-25" to 22),
-            updatedAtMs = 1_000L
+            exportedAtMs = 1_000L
         )
-        val remote = CloudSavePayload(
+        val incoming = ProgressTransferPayload(
             highestUnlockedLevel = 9,
             completedLevels = mapOf(2 to 11, 8 to 19),
             completedDailyMoves = mapOf("2026-11-25" to 18, "2026-11-26" to 24),
-            updatedAtMs = 2_000L
+            activeSession = BackupActiveSession(
+                currentLevel = 9,
+                themeOrdinal = 1,
+                tubesJson = """[{"id":0,"segments":[0,1],"isExtraTube":false}]""",
+                initialTubesJson = """[{"id":0,"segments":[0,1],"isExtraTube":false}]""",
+                undoStackJson = "[]",
+                remainingUndos = 4,
+                extraTubeUsed = false,
+                moveCount = 3
+            ),
+            dailyChallenges = listOf(
+                BackupDailyChallenge(
+                    dateKey = "2026-11-26",
+                    tierOrdinal = 2,
+                    colorCount = 7,
+                    themeOrdinal = 0,
+                    initialTubesJson = """[{"id":0,"segments":[0],"isExtraTube":false}]""",
+                    currentTubesJson = """[{"id":0,"segments":[0],"isExtraTube":false}]""",
+                    undoStackJson = "[]",
+                    isCompleted = true,
+                    bestMoves = 24
+                )
+            ),
+            exportedAtMs = 2_000L
         )
 
-        val merged = PlayGamesSaveManager.mergePayloads(local, remote)
+        val encoded = ProgressTransferCodec.encodeToJsonString(incoming)
+        val decoded = ProgressTransferCodec.decodeFromJsonString(encoded).getOrThrow()
+        assertEquals(incoming.highestUnlockedLevel, decoded.highestUnlockedLevel)
+        assertEquals(incoming.completedLevels, decoded.completedLevels)
+        assertEquals(incoming.completedDailyMoves, decoded.completedDailyMoves)
+        assertEquals(9, decoded.activeSession?.currentLevel)
+        assertEquals(4, decoded.activeSession?.remainingUndos)
+        assertEquals(1, decoded.dailyChallenges.size)
+        assertEquals("2026-11-26", decoded.dailyChallenges.first().dateKey)
 
+        val merged = ProgressTransferCodec.mergePayloads(local, decoded)
         assertEquals(9, merged.highestUnlockedLevel)
         assertEquals(mapOf(1 to 8, 2 to 11, 8 to 19), merged.completedLevels)
         assertEquals(mapOf("2026-11-25" to 18, "2026-11-26" to 24), merged.completedDailyMoves)
-        assertEquals(2_000L, merged.updatedAtMs)
+        assertEquals(2_000L, merged.exportedAtMs)
+
+        val rejected = ProgressTransferCodec.decodeFromJsonString("""{"appId":"other","schemaVersion":1}""")
+        assertTrue(rejected.isFailure)
     }
 
     @Test

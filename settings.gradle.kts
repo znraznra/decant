@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "Decant!"
+rootProject.name = "decant"
 
 include(":app")

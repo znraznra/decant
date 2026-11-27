@@ -1,31 +1,39 @@
 package com.example
 
-import android.app.Activity
 import com.example.audio.SoundFeedback
-import com.example.audio.SoundFeedbackEngine
+import com.example.audio.SoundManager
 import com.example.data.GameProgressStore
 import com.example.data.ProgressRepository
 import com.example.data.local.DailyChallengeEntity
+import com.example.data.local.DifficultyRecordEntity
 import com.example.data.local.LevelProgressEntity
 import com.example.data.prefs.UserPreferences
+import com.example.data.transfer.ProgressTransferCodec
+import com.example.domain.BackupActiveSession
 import com.example.domain.DailyChallengeSpec
+import com.example.domain.DifficultyTier
+import com.example.domain.ImportSummary
+import com.example.domain.LevelCompletionResult
 import com.example.domain.MAX_UNDO_PER_STAGE
 import com.example.domain.PourMove
+import com.example.domain.ProgressTransferPayload
 import com.example.domain.PuzzleEngine
 import com.example.domain.StudioThemeId
-import com.example.domain.SyncStatus
 import com.example.domain.TubeModel
+import com.example.domain.formatElapsedDuration
 import com.example.ui.viewmodel.GameBoardViewModel
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
@@ -231,6 +239,8 @@ class GameBoardViewModelTest {
         assertEquals(1, soundRecorder.pourCalls.size)
         assertEquals(1f, soundRecorder.pourCalls.first().first, 0.01f)
         assertEquals(true to true, soundRecorder.pourCalls.first().second to soundRecorder.pourCalls.first().third)
+        assertEquals(1, soundRecorder.colorMixCalls.size)
+        assertEquals(0 to 1, soundRecorder.colorMixCalls.first().first to soundRecorder.colorMixCalls.first().second)
         assertEquals(listOf(true to true), soundRecorder.victoryCalls)
 
         // Verify preference toggles immediately update feedback flags
@@ -246,17 +256,144 @@ class GameBoardViewModelTest {
     }
 
     @Test
+    fun soundManager_triggersColorMixOnlyWhenPouringOntoExistingLiquid() = runTest {
+        val board = listOf(
+            TubeModel(id = 0, segments = listOf(2, 2)),
+            TubeModel(id = 1, segments = listOf(2)),
+            TubeModel(id = 2, segments = emptyList())
+        )
+        store.saveActiveSession(
+            currentLevel = 1,
+            theme = StudioThemeId.CLEAN_GLASS,
+            tubes = board,
+            undoStack = emptyList(),
+            extraTubeUsed = false,
+            moveCount = 0
+        )
+
+        val vm = GameBoardViewModel(
+            repository = store,
+            soundEngine = soundRecorder,
+            pourAnimationDurationMs = 0L,
+            computationDispatcher = testDispatcher
+        )
+        advanceUntilIdle()
+        soundRecorder.clear()
+
+        // Pouring into empty tube 2 triggers pour clip without color mix
+        vm.onTubeClick(1)
+        vm.onTubeClick(2)
+        advanceUntilIdle()
+        assertEquals(1, soundRecorder.pourCalls.size)
+        assertTrue(soundRecorder.colorMixCalls.isEmpty())
+
+        // Pouring from tube 2 onto existing liquid in tube 0 triggers pour + color mix
+        soundRecorder.clear()
+        vm.onTubeClick(2)
+        vm.onTubeClick(0)
+        advanceUntilIdle()
+        assertEquals(1, soundRecorder.pourCalls.size)
+        assertEquals(1, soundRecorder.colorMixCalls.size)
+        assertEquals(2, soundRecorder.colorMixCalls.first().first)
+    }
+
+    @Test
     fun soundFeedbackSynthesis_producesBoundedAudibleBuffers() {
-        val select = SoundFeedbackEngine.synthesizeChime(540.0, 700.0, 55, 0.25)
-        val pour = SoundFeedbackEngine.synthesizePourBubble(450.0, 195)
-        val victory = SoundFeedbackEngine.synthesizeVictoryArpeggio()
+        val select = SoundManager.synthesizeChime(540.0, 700.0, 55, 0.25)
+        val pour = SoundManager.synthesizePourClip(450.0, 195)
+        val colorMix = SoundManager.synthesizeColorMixClip(colorVariant = 1, durationMs = 145)
+        val levelComplete = SoundManager.synthesizeLevelCompleteClip()
 
         assertTrue(select.isNotEmpty())
         assertTrue(pour.isNotEmpty())
-        assertTrue(victory.isNotEmpty())
+        assertTrue(colorMix.isNotEmpty())
+        assertTrue(levelComplete.isNotEmpty())
         assertTrue(select.any { it.toInt() != 0 })
         assertTrue(pour.any { it.toInt() != 0 })
-        assertTrue(victory.any { it.toInt() != 0 })
+        assertTrue(colorMix.any { it.toInt() != 0 })
+        assertTrue(levelComplete.any { it.toInt() != 0 })
+    }
+
+    @Test
+    fun levelTimer_tracksElapsedTimeOnlyWhenActiveAndEnabled_andRecordsBestTierTime() = runTest {
+        val board = listOf(
+            TubeModel(id = 0, segments = listOf(0, 0, 0)),
+            TubeModel(id = 1, segments = listOf(0)),
+            TubeModel(id = 2, segments = emptyList())
+        )
+        store.saveActiveSession(
+            currentLevel = 1,
+            theme = StudioThemeId.CLEAN_GLASS,
+            tubes = board,
+            undoStack = emptyList(),
+            extraTubeUsed = false,
+            moveCount = 0
+        )
+
+        var fakeNowMs = 10_000L
+        val vm = GameBoardViewModel(
+            repository = store,
+            soundEngine = soundRecorder,
+            pourAnimationDurationMs = 0L,
+            computationDispatcher = testDispatcher,
+            clockMsProvider = { fakeNowMs }
+        )
+        advanceUntilIdle()
+        assertEquals(0L, vm.uiState.value.elapsedTimeMs)
+
+        // Activate board and advance virtual time by 3 seconds
+        vm.setBoardActive(true)
+        runCurrent()
+        repeat(3) {
+            fakeNowMs += 1_000L
+            advanceTimeBy(1_000L)
+            runCurrent()
+        }
+        assertEquals(3_000L, vm.uiState.value.elapsedTimeMs)
+        assertEquals("0:03", formatElapsedDuration(vm.uiState.value.elapsedTimeMs))
+
+        // Leaving board pauses timer cleanly
+        vm.setBoardActive(false)
+        runCurrent()
+        fakeNowMs += 5_000L
+        advanceTimeBy(5_000L)
+        runCurrent()
+        assertEquals(3_000L, vm.uiState.value.elapsedTimeMs)
+
+        // Disabling timer preference prevents further accumulation even when board active
+        vm.setTimerEnabled(false)
+        runCurrent()
+        vm.setBoardActive(true)
+        runCurrent()
+        fakeNowMs += 3_000L
+        advanceTimeBy(3_000L)
+        runCurrent()
+        assertEquals(3_000L, vm.uiState.value.elapsedTimeMs)
+
+        // Re-enabling timer resumes tracking
+        vm.setTimerEnabled(true)
+        runCurrent()
+        repeat(2) {
+            fakeNowMs += 1_000L
+            advanceTimeBy(1_000L)
+            runCurrent()
+        }
+        assertEquals(5_000L, vm.uiState.value.elapsedTimeMs)
+
+        // Completing the level stops timer and persists Warmup tier best time
+        vm.onTubeClick(1)
+        vm.onTubeClick(0)
+        advanceUntilIdle()
+        assertTrue(vm.uiState.value.isLevelComplete)
+        assertTrue(vm.uiState.value.isNewBestTime)
+        assertEquals(5_000L, vm.uiState.value.bestTierTimeMs)
+        assertEquals(5_000L, vm.tierBestTimes.value[DifficultyTier.WARMUP])
+
+        // Restarting level resets elapsed timer to 0
+        vm.setBoardActive(false)
+        vm.restartLevel()
+        advanceUntilIdle()
+        assertEquals(0L, vm.uiState.value.elapsedTimeMs)
     }
 
     @Test
@@ -386,19 +523,67 @@ class GameBoardViewModelTest {
     }
 
     @Test
-    fun playGamesSyncToggle_updatesStatusWithoutAffectingLocalGameplay() = runTest {
+    fun importBackup_mergesHigherProgressAndUnlocksUnstartedLevel() = runTest {
         advanceUntilIdle()
-        viewModel.setPlayGamesSyncEnabled(false)
+        assertEquals(1, viewModel.uiState.value.levelNumber)
+
+        val incoming = ProgressTransferPayload(
+            highestUnlockedLevel = 6,
+            completedLevels = mapOf(1 to 7, 2 to 9, 5 to 14),
+            completedDailyMoves = mapOf("2026-11-26" to 20),
+            exportedAtMs = 5_000L
+        )
+        val summary = viewModel.importPayloadDirectly(incoming)
         advanceUntilIdle()
 
-        assertFalse(viewModel.preferences.value.playGamesSyncEnabled)
-        assertEquals(SyncStatus.Disabled, viewModel.syncStatus.value)
+        assertEquals(3, summary.newLevelsAdded)
+        assertEquals(1, summary.newDailyAdded)
+        assertEquals(6, summary.highestUnlockedLevel)
+        assertEquals(6, viewModel.preferences.value.highestUnlockedLevel)
+        assertEquals(6, viewModel.uiState.value.levelNumber)
+    }
 
-        viewModel.setPlayGamesSyncEnabled(true)
+    @Test
+    fun replaceWithBackup_replacesLocalProgressAndLoadsImportedSession() = runTest {
+        advanceUntilIdle()
+        viewModel.loadLevel(8)
+        advanceUntilIdle()
+        store.markLevelCompleted(7, 12)
+
+        val importedTubes = listOf(
+            TubeModel(id = 0, segments = listOf(0, 1, 0, 1)),
+            TubeModel(id = 1, segments = listOf(1, 0, 1, 0)),
+            TubeModel(id = 2, segments = emptyList()),
+            TubeModel(id = 3, segments = emptyList())
+        )
+        val json = Json { encodeDefaults = true }
+        val backup = ProgressTransferPayload(
+            highestUnlockedLevel = 3,
+            completedLevels = mapOf(1 to 5, 2 to 9),
+            completedDailyMoves = mapOf("2026-11-27" to 16),
+            activeSession = BackupActiveSession(
+                currentLevel = 3,
+                themeOrdinal = StudioThemeId.BOTANICAL_ZEN.ordinal,
+                tubesJson = json.encodeToString(importedTubes),
+                initialTubesJson = json.encodeToString(importedTubes),
+                undoStackJson = "[]",
+                remainingUndos = MAX_UNDO_PER_STAGE,
+                extraTubeUsed = false,
+                moveCount = 4
+            ),
+            exportedAtMs = 9_000L
+        )
+
+        val summary = viewModel.replaceWithBackupPayloadDirectly(backup)
         advanceUntilIdle()
 
-        assertTrue(viewModel.preferences.value.playGamesSyncEnabled)
-        assertEquals(SyncStatus.SignedOut, viewModel.syncStatus.value)
+        assertTrue(summary.restoredActiveSession)
+        assertEquals(2, summary.newLevelsAdded)
+        assertEquals(3, summary.highestUnlockedLevel)
+        assertEquals(3, viewModel.preferences.value.highestUnlockedLevel)
+        assertEquals(3, viewModel.uiState.value.levelNumber)
+        assertEquals(4, viewModel.uiState.value.moveCount)
+        assertEquals(importedTubes, viewModel.uiState.value.tubes)
     }
 
     @Test
@@ -467,6 +652,7 @@ class GameBoardViewModelTest {
     private class RecordingSoundFeedback : SoundFeedback {
         val selectCalls = mutableListOf<Pair<Boolean, Boolean>>()
         val pourCalls = mutableListOf<Triple<Float, Boolean, Boolean>>()
+        val colorMixCalls = mutableListOf<Pair<Int, Int>>()
         val undoCalls = mutableListOf<Pair<Boolean, Boolean>>()
         val errorCalls = mutableListOf<Pair<Boolean, Boolean>>()
         val victoryCalls = mutableListOf<Pair<Boolean, Boolean>>()
@@ -479,6 +665,10 @@ class GameBoardViewModelTest {
             pourCalls.add(Triple(fillRatio, soundEnabled, hapticsEnabled))
         }
 
+        override fun playColorMix(colorId: Int, units: Int, soundEnabled: Boolean, hapticsEnabled: Boolean) {
+            colorMixCalls.add(colorId to units)
+        }
+
         override fun playUndo(soundEnabled: Boolean, hapticsEnabled: Boolean) {
             undoCalls.add(soundEnabled to hapticsEnabled)
         }
@@ -487,13 +677,14 @@ class GameBoardViewModelTest {
             errorCalls.add(soundEnabled to hapticsEnabled)
         }
 
-        override fun playVictory(soundEnabled: Boolean, hapticsEnabled: Boolean) {
+        override fun playLevelComplete(soundEnabled: Boolean, hapticsEnabled: Boolean) {
             victoryCalls.add(soundEnabled to hapticsEnabled)
         }
 
         fun clear() {
             selectCalls.clear()
             pourCalls.clear()
+            colorMixCalls.clear()
             undoCalls.clear()
             errorCalls.clear()
             victoryCalls.clear()
@@ -501,12 +692,12 @@ class GameBoardViewModelTest {
     }
 
     private class FakeGameProgressStore : GameProgressStore {
-        private val syncStatusState = MutableStateFlow<SyncStatus>(SyncStatus.SignedOut)
-        override val syncStatus: StateFlow<SyncStatus> = syncStatusState.asStateFlow()
         private val progressState = MutableStateFlow<List<LevelProgressEntity>>(emptyList())
         override val allProgressFlow: Flow<List<LevelProgressEntity>> = progressState
         private val dailyEntitiesState = MutableStateFlow<List<DailyChallengeEntity>>(emptyList())
         override val allDailyChallengesFlow: Flow<List<DailyChallengeEntity>> = dailyEntitiesState
+        private val tierRecordsState = MutableStateFlow<List<DifficultyRecordEntity>>(emptyList())
+        override val allTierRecordsFlow: Flow<List<DifficultyRecordEntity>> = tierRecordsState
         private val prefsState = MutableStateFlow(UserPreferences())
         override val preferencesFlow: Flow<UserPreferences> = prefsState
         private var session: ProgressRepository.ActiveSessionSnapshot? = null
@@ -522,19 +713,64 @@ class GameBoardViewModelTest {
             remainingUndos: Int,
             extraTubeUsed: Boolean,
             moveCount: Int,
-            initialTubes: List<TubeModel>
+            initialTubes: List<TubeModel>,
+            elapsedTimeMs: Long
         ) {
             val resolvedInitial = initialTubes.ifEmpty { session?.initialTubes ?: tubes }
             session = ProgressRepository.ActiveSessionSnapshot(
-                currentLevel, theme, tubes, undoStack, remainingUndos, extraTubeUsed, moveCount, resolvedInitial
+                currentLevel = currentLevel,
+                theme = theme,
+                tubes = tubes,
+                undoStack = undoStack,
+                remainingUndos = remainingUndos,
+                extraTubeUsed = extraTubeUsed,
+                moveCount = moveCount,
+                initialTubes = resolvedInitial,
+                elapsedTimeMs = elapsedTimeMs
             )
         }
 
-        override suspend fun markLevelCompleted(levelNumber: Int, moves: Int): Boolean {
+        override suspend fun markLevelCompleted(
+            levelNumber: Int,
+            moves: Int,
+            elapsedTimeMs: Long
+        ): LevelCompletionResult {
+            val existing = progressState.value.firstOrNull { it.levelNumber == levelNumber }
+            val isNewBestMoves = existing?.bestMoves == null || moves < existing.bestMoves
+            val bestMoves = if (existing?.bestMoves == null) moves else minOf(existing.bestMoves, moves)
+            val validTime = elapsedTimeMs.takeIf { it > 0L }
+            val bestLevelTime = when {
+                validTime == null -> existing?.bestTimeMs
+                existing?.bestTimeMs == null -> validTime
+                else -> minOf(existing.bestTimeMs, validTime)
+            }
             val updated = progressState.value.filterNot { it.levelNumber == levelNumber } +
-                LevelProgressEntity(levelNumber, true, moves, 1000L)
+                LevelProgressEntity(levelNumber, true, bestMoves, 1000L, bestLevelTime)
             progressState.value = updated
-            return true
+
+            val (tier, _) = PuzzleEngine.difficultyForLevel(levelNumber)
+            val tierResult = recordTierBest(tier, validTime, levelNumber)
+            return LevelCompletionResult(
+                isNewBestMoves = isNewBestMoves,
+                isNewBestTime = tierResult.first,
+                bestTierTimeMs = tierResult.second
+            )
+        }
+
+        private fun recordTierBest(
+            tier: DifficultyTier,
+            validTime: Long?,
+            levelNumber: Int
+        ): Pair<Boolean, Long?> {
+            val existing = tierRecordsState.value.firstOrNull { it.tierOrdinal == tier.ordinal }
+            if (validTime == null) return false to existing?.bestTimeMs
+            val isNewBest = existing == null || validTime < existing.bestTimeMs
+            val best = if (existing == null) validTime else minOf(existing.bestTimeMs, validTime)
+            if (isNewBest) {
+                tierRecordsState.value = tierRecordsState.value.filterNot { it.tierOrdinal == tier.ordinal } +
+                    DifficultyRecordEntity(tier.ordinal, best, levelNumber, 1000L)
+            }
+            return isNewBest to best
         }
 
         override suspend fun loadOrCreateDailyChallenge(
@@ -555,7 +791,8 @@ class GameBoardViewModelTest {
                 extraTubeUsed = false,
                 moveCount = 0,
                 isCompleted = false,
-                bestMoves = null
+                bestMoves = null,
+                elapsedTimeMs = 0L
             )
             dailySnapshots[dateKey] = created
             syncDailyEntitiesFlow()
@@ -569,7 +806,8 @@ class GameBoardViewModelTest {
             undoStack: List<PourMove>,
             remainingUndos: Int,
             extraTubeUsed: Boolean,
-            moveCount: Int
+            moveCount: Int,
+            elapsedTimeMs: Long
         ) {
             val existing = dailySnapshots[dateKey] ?: return
             dailySnapshots[dateKey] = existing.copy(
@@ -578,18 +816,32 @@ class GameBoardViewModelTest {
                 undoStack = undoStack,
                 remainingUndos = remainingUndos,
                 extraTubeUsed = extraTubeUsed,
-                moveCount = moveCount
+                moveCount = moveCount,
+                elapsedTimeMs = elapsedTimeMs
             )
             syncDailyEntitiesFlow()
         }
 
-        override suspend fun markDailyChallengeCompleted(dateKey: String, moves: Int): Boolean {
-            val existing = dailySnapshots[dateKey] ?: return false
+        override suspend fun markDailyChallengeCompleted(
+            dateKey: String,
+            moves: Int,
+            elapsedTimeMs: Long
+        ): LevelCompletionResult {
+            val existing = dailySnapshots[dateKey] ?: return LevelCompletionResult(false)
             val isNewBest = existing.bestMoves == null || moves < existing.bestMoves
             val best = if (existing.bestMoves == null) moves else minOf(existing.bestMoves, moves)
-            dailySnapshots[dateKey] = existing.copy(isCompleted = true, bestMoves = best)
+            dailySnapshots[dateKey] = existing.copy(
+                isCompleted = true,
+                bestMoves = best,
+                elapsedTimeMs = elapsedTimeMs
+            )
             syncDailyEntitiesFlow()
-            return isNewBest
+            val tierResult = recordTierBest(existing.tier, elapsedTimeMs.takeIf { it > 0L }, 0)
+            return LevelCompletionResult(
+                isNewBestMoves = isNewBest,
+                isNewBestTime = tierResult.first,
+                bestTierTimeMs = tierResult.second
+            )
         }
 
         private fun syncDailyEntitiesFlow() {
@@ -609,21 +861,141 @@ class GameBoardViewModelTest {
                         isCompleted = s.isCompleted,
                         bestMoves = s.bestMoves,
                         completedAtMs = if (s.isCompleted) 1000L else null,
-                        updatedAtMs = 1000L
+                        updatedAtMs = 1000L,
+                        elapsedTimeMs = s.elapsedTimeMs
                     )
                 }
             }
         }
 
-        override suspend fun syncWithCloudIfEnabled(activity: Activity?, interactiveSignIn: Boolean): Boolean = false
-        override suspend fun setPlayGamesSyncEnabled(enabled: Boolean) {
-            prefsState.value = prefsState.value.copy(playGamesSyncEnabled = enabled)
-            syncStatusState.value = if (enabled) SyncStatus.SignedOut else SyncStatus.Disabled
+        override suspend fun exportBackupPayload(): ProgressTransferPayload {
+            val prefs = prefsState.value
+            return ProgressTransferPayload(
+                highestUnlockedLevel = prefs.highestUnlockedLevel,
+                completedLevels = progressState.value.associate { it.levelNumber to (it.bestMoves ?: 0) },
+                completedDailyMoves = dailySnapshots.filterValues { it.isCompleted }
+                    .mapValues { (_, v) -> v.bestMoves ?: v.moveCount },
+                bestLevelTimes = progressState.value.mapNotNull { row ->
+                    row.bestTimeMs?.let { row.levelNumber to it }
+                }.toMap(),
+                bestTierTimes = tierRecordsState.value.associate { it.tierOrdinal to it.bestTimeMs },
+                soundEnabled = prefs.soundEnabled,
+                hapticsEnabled = prefs.hapticsEnabled,
+                colorblindEnabled = prefs.colorblindEnabled,
+                randomizeThemePerLevel = prefs.randomizeThemePerLevel,
+                timerEnabled = prefs.timerEnabled,
+                pinnedThemeOrdinal = prefs.pinnedTheme.ordinal,
+                exportedAtMs = 1_000L
+            )
         }
+
+        override suspend fun importBackupPayload(
+            incoming: ProgressTransferPayload,
+            importSettings: Boolean
+        ): ImportSummary {
+            val local = exportBackupPayload()
+            val merged = ProgressTransferCodec.mergePayloads(local, incoming)
+            val newLevels = (merged.completedLevels.keys - local.completedLevels.keys).size
+            val newDaily = (merged.completedDailyMoves.keys - local.completedDailyMoves.keys).size
+            progressState.value = merged.completedLevels.map { (lvl, moves) ->
+                LevelProgressEntity(lvl, true, moves.takeIf { it > 0 }, merged.exportedAtMs, merged.bestLevelTimes[lvl])
+            }
+            tierRecordsState.value = merged.bestTierTimes.map { (ord, ms) ->
+                DifficultyRecordEntity(ord, ms, 0, merged.exportedAtMs)
+            }
+            for ((date, moves) in merged.completedDailyMoves) {
+                val existing = dailySnapshots[date]
+                if (existing == null) {
+                    val spec = PuzzleEngine.generateDailyChallenge(date)
+                    dailySnapshots[date] = ProgressRepository.DailyChallengeSnapshot(
+                        dateKey = date,
+                        tier = spec.tier,
+                        colorCount = spec.colorCount,
+                        theme = spec.defaultTheme,
+                        initialTubes = spec.tubes,
+                        currentTubes = spec.tubes,
+                        undoStack = emptyList(),
+                        remainingUndos = MAX_UNDO_PER_STAGE,
+                        extraTubeUsed = false,
+                        moveCount = moves,
+                        isCompleted = true,
+                        bestMoves = moves
+                    )
+                }
+            }
+            syncDailyEntitiesFlow()
+            prefsState.value = prefsState.value.copy(highestUnlockedLevel = merged.highestUnlockedLevel)
+            return ImportSummary(newLevels, newDaily, merged.highestUnlockedLevel)
+        }
+
+        override suspend fun replaceWithBackupPayload(incoming: ProgressTransferPayload): ImportSummary {
+            val json = Json { ignoreUnknownKeys = true }
+            progressState.value = incoming.completedLevels.map { (lvl, moves) ->
+                LevelProgressEntity(lvl, true, moves.takeIf { it > 0 }, incoming.exportedAtMs, incoming.bestLevelTimes[lvl])
+            }
+            tierRecordsState.value = incoming.bestTierTimes.map { (ord, ms) ->
+                DifficultyRecordEntity(ord, ms, 0, incoming.exportedAtMs)
+            }
+            dailySnapshots.clear()
+            for ((date, moves) in incoming.completedDailyMoves) {
+                val spec = PuzzleEngine.generateDailyChallenge(date)
+                dailySnapshots[date] = ProgressRepository.DailyChallengeSnapshot(
+                    dateKey = date,
+                    tier = spec.tier,
+                    colorCount = spec.colorCount,
+                    theme = spec.defaultTheme,
+                    initialTubes = spec.tubes,
+                    currentTubes = spec.tubes,
+                    undoStack = emptyList(),
+                    remainingUndos = MAX_UNDO_PER_STAGE,
+                    extraTubeUsed = false,
+                    moveCount = moves,
+                    isCompleted = true,
+                    bestMoves = moves
+                )
+            }
+            syncDailyEntitiesFlow()
+            val incomingSession = incoming.activeSession
+            session = if (incomingSession != null) {
+                val tubes = json.decodeFromString<List<TubeModel>>(incomingSession.tubesJson)
+                val initial = if (incomingSession.initialTubesJson.isNotBlank()) {
+                    json.decodeFromString<List<TubeModel>>(incomingSession.initialTubesJson)
+                } else {
+                    tubes
+                }
+                val undo = json.decodeFromString<List<PourMove>>(incomingSession.undoStackJson)
+                val theme = StudioThemeId.entries[incomingSession.themeOrdinal.coerceIn(0, StudioThemeId.entries.lastIndex)]
+                ProgressRepository.ActiveSessionSnapshot(
+                    currentLevel = incomingSession.currentLevel,
+                    theme = theme,
+                    tubes = tubes,
+                    undoStack = undo,
+                    remainingUndos = incomingSession.remainingUndos,
+                    extraTubeUsed = incomingSession.extraTubeUsed,
+                    moveCount = incomingSession.moveCount,
+                    initialTubes = initial,
+                    elapsedTimeMs = incomingSession.elapsedTimeMs
+                )
+            } else {
+                null
+            }
+            prefsState.value = prefsState.value.copy(
+                highestUnlockedLevel = incoming.highestUnlockedLevel,
+                timerEnabled = incoming.timerEnabled
+            )
+            return ImportSummary(
+                newLevelsAdded = incoming.completedLevels.size,
+                newDailyAdded = dailySnapshots.size,
+                highestUnlockedLevel = incoming.highestUnlockedLevel,
+                restoredActiveSession = incomingSession != null
+            )
+        }
+
         override suspend fun setSoundEnabled(enabled: Boolean) { prefsState.value = prefsState.value.copy(soundEnabled = enabled) }
         override suspend fun setHapticsEnabled(enabled: Boolean) { prefsState.value = prefsState.value.copy(hapticsEnabled = enabled) }
         override suspend fun setColorblindEnabled(enabled: Boolean) { prefsState.value = prefsState.value.copy(colorblindEnabled = enabled) }
         override suspend fun setRandomizeThemePerLevel(enabled: Boolean) { prefsState.value = prefsState.value.copy(randomizeThemePerLevel = enabled) }
+        override suspend fun setTimerEnabled(enabled: Boolean) { prefsState.value = prefsState.value.copy(timerEnabled = enabled) }
         override suspend fun setPinnedTheme(theme: StudioThemeId) { prefsState.value = prefsState.value.copy(pinnedTheme = theme) }
     }
 }

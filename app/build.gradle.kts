@@ -14,11 +14,16 @@ android {
   compileSdk { version = release(36) { minorApiLevel = 1 } }
 
   defaultConfig {
-    applicationId = "com.aistudio.chromaflow.wqmvzt"
+    applicationId = "com.znraznra.decant"
     minSdk = 24
     targetSdk = 36
     versionCode = 1
     versionName = "1.0"
+
+    buildConfigField("String", "DEVELOPER_NAME", "\"znraznra\"")
+    buildConfigField("String", "PROJECT_NAME", "\"decant\"")
+    manifestPlaceholders["developerName"] = "znraznra"
+    manifestPlaceholders["projectName"] = "decant"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -124,7 +129,7 @@ dependencies {
   // implementation(libs.moshi.kotlin)
   // implementation(libs.okhttp)
   // implementation(libs.play.services.location)
-  implementation(libs.play.services.games.v2)
+  // implementation(libs.play.services.games.v2)
   // implementation(libs.retrofit)
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)

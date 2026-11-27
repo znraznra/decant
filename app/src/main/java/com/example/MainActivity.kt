@@ -37,12 +37,11 @@ class MainActivity : ComponentActivity() {
 
     private val viewModel: GameBoardViewModel by viewModels {
         val app = application as ChromaFlowApplication
-        GameBoardViewModel.Factory(app.progressRepository, app.soundFeedbackEngine)
-    }
-
-    override fun onResume() {
-        super.onResume()
-        viewModel.onAppResumeSync(this)
+        GameBoardViewModel.Factory(
+            repository = app.progressRepository,
+            soundEngine = app.soundManager,
+            peerTransferEngine = app.peerTransferEngine
+        )
     }
 
     @OptIn(ExperimentalMaterial3WindowSizeClassApi::class)
@@ -55,7 +54,11 @@ class MainActivity : ComponentActivity() {
             val uiState by viewModel.uiState.collectAsStateWithLifecycle()
             val preferences by viewModel.preferences.collectAsStateWithLifecycle()
             val completedProgress by viewModel.completedProgress.collectAsStateWithLifecycle()
-            val syncStatus by viewModel.syncStatus.collectAsStateWithLifecycle()
+            val tierBestTimes by viewModel.tierBestTimes.collectAsStateWithLifecycle()
+            val transferState by viewModel.transferUiState.collectAsStateWithLifecycle()
+            val discoveredPeers by viewModel.discoveredPeers.collectAsStateWithLifecycle()
+            val fileBackupFeedback by viewModel.fileBackupFeedback.collectAsStateWithLifecycle()
+            val pendingBackupPreview by viewModel.pendingBackupPreview.collectAsStateWithLifecycle()
 
             val activeThemeSpec = StudioThemes.get(uiState.activeTheme)
 
@@ -112,6 +115,7 @@ class MainActivity : ComponentActivity() {
                                 uiState.levelNumber
                             ),
                             completedProgress = completedProgress,
+                            tierBestTimes = tierBestTimes,
                             onSelectLevel = { level ->
                                 viewModel.loadLevel(level)
                                 navController.navigate(GameRoute) {
@@ -128,19 +132,34 @@ class MainActivity : ComponentActivity() {
                             theme = activeThemeSpec,
                             preferences = preferences,
                             completedCount = completedProgress.count { it.isCompleted },
-                            syncStatus = syncStatus,
-                            onSetPlayGamesSync = { enabled ->
-                                viewModel.setPlayGamesSyncEnabled(enabled, this@MainActivity)
+                            transferState = transferState,
+                            discoveredPeers = discoveredPeers,
+                            fileBackupFeedback = fileBackupFeedback,
+                            pendingBackupPreview = pendingBackupPreview,
+                            onExportBackup = { onReady ->
+                                viewModel.exportBackupForShare(this@MainActivity, onReady)
                             },
-                            onManualSync = {
-                                viewModel.triggerManualCloudSync(this@MainActivity)
+                            onImportBackupUri = { uri ->
+                                viewModel.previewBackupFromUri(this@MainActivity, uri)
                             },
+                            onConfirmReplaceBackup = viewModel::confirmReplaceWithPendingBackup,
+                            onDismissBackupPreview = viewModel::dismissPendingBackupPreview,
+                            onStartPeerReceive = viewModel::startPeerReceive,
+                            onStartPeerDiscover = viewModel::startPeerDiscovery,
+                            onSendToPeer = viewModel::sendProgressToPeer,
+                            onStopPeerTransfer = viewModel::stopPeerTransfer,
+                            onResetTransferState = viewModel::resetTransferState,
                             onSetSound = viewModel::setSoundEnabled,
                             onSetHaptics = viewModel::setHapticsEnabled,
                             onSetColorblind = viewModel::setColorblindEnabled,
                             onSetRandomizeTheme = viewModel::setRandomizeThemePerLevel,
+                            onSetTimer = viewModel::setTimerEnabled,
                             onSelectPinnedTheme = viewModel::setPinnedTheme,
-                            onBack = { navController.popBackStack() }
+                            onBack = {
+                                viewModel.stopPeerTransfer()
+                                viewModel.clearFileBackupFeedback()
+                                navController.popBackStack()
+                            }
                         )
                     }
                 }

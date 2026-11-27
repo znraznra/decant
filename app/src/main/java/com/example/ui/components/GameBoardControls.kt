@@ -75,6 +75,7 @@ import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.data.prefs.UserPreferences
 import com.example.domain.MAX_UNDO_PER_STAGE
+import com.example.domain.formatElapsedDuration
 import com.example.ui.theme.StudioThemeSpec
 import com.example.ui.viewmodel.GameUiState
 import kotlin.math.PI
@@ -658,6 +659,11 @@ fun VictoryCelebrationOverlay(
     levelNumber: Int,
     moveCount: Int,
     isNewBest: Boolean,
+    isNewBestTime: Boolean = false,
+    timerEnabled: Boolean = true,
+    elapsedTimeMs: Long = 0L,
+    bestTierTimeMs: Long? = null,
+    tierLabel: String = "",
     isDailyChallenge: Boolean = false,
     dailyDisplayDate: String = "",
     dailyStreak: Int = 0,
@@ -718,18 +724,38 @@ fun VictoryCelebrationOverlay(
                     textAlign = TextAlign.Center
                 )
 
+                val timePart = if (timerEnabled && elapsedTimeMs > 0L) {
+                    " • ${formatElapsedDuration(elapsedTimeMs)}"
+                } else {
+                    ""
+                }
                 Text(
                     text = if (isDailyChallenge && dailyStreak > 0) {
-                        "$dailyDisplayDate • Solved in $moveCount moves • $dailyStreak-day streak"
+                        "$dailyDisplayDate • $moveCount moves$timePart • $dailyStreak-day streak"
                     } else {
-                        "Solved in $moveCount moves"
+                        "Solved in $moveCount moves$timePart"
                     },
-                    style = MaterialTheme.typography.bodyLarge,
+                    style = MaterialTheme.typography.bodyLarge.copy(fontFeatureSettings = "tnum"),
                     color = theme.textSecondary,
                     textAlign = TextAlign.Center
                 )
 
-                if (isNewBest) {
+                if (timerEnabled && bestTierTimeMs != null && tierLabel.isNotBlank()) {
+                    Text(
+                        text = "$tierLabel Best Time: ${formatElapsedDuration(bestTierTimeMs)}",
+                        style = MaterialTheme.typography.labelMedium.copy(fontFeatureSettings = "tnum"),
+                        color = theme.textSecondary.copy(alpha = 0.85f),
+                        textAlign = TextAlign.Center
+                    )
+                }
+
+                if (isNewBest || (timerEnabled && isNewBestTime)) {
+                    val badgeLabel = when {
+                        isDailyChallenge && isNewBest -> "New Daily Best!"
+                        timerEnabled && isNewBestTime && isNewBest -> "New Best Moves & Time!"
+                        timerEnabled && isNewBestTime -> "Fastest $tierLabel Time!"
+                        else -> "New Best Record!"
+                    }
                     Box(
                         modifier = Modifier
                             .clip(CircleShape)
@@ -737,7 +763,7 @@ fun VictoryCelebrationOverlay(
                             .padding(horizontal = 12.dp, vertical = 4.dp)
                     ) {
                         Text(
-                            text = if (isDailyChallenge) "New Daily Best!" else "New Best Record!",
+                            text = badgeLabel,
                             style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
                             color = theme.tubeCompletedGlow
                         )

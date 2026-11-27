@@ -9,7 +9,8 @@ data class LevelProgressEntity(
     @PrimaryKey val levelNumber: Int,
     val isCompleted: Boolean,
     val bestMoves: Int?,
-    val completedAtMs: Long
+    val completedAtMs: Long,
+    val bestTimeMs: Long? = null
 )
 
 @Entity(tableName = "active_session")
@@ -23,7 +24,8 @@ data class ActiveSessionEntity(
     val remainingUndos: Int = MAX_UNDO_PER_STAGE,
     val extraTubeUsed: Boolean,
     val moveCount: Int,
-    val updatedAtMs: Long
+    val updatedAtMs: Long,
+    val elapsedTimeMs: Long = 0L
 )
 
 @Entity(tableName = "daily_challenges")
@@ -41,5 +43,14 @@ data class DailyChallengeEntity(
     val isCompleted: Boolean = false,
     val bestMoves: Int? = null,
     val completedAtMs: Long? = null,
-    val updatedAtMs: Long = 0L
+    val updatedAtMs: Long = 0L,
+    val elapsedTimeMs: Long = 0L
+)
+
+@Entity(tableName = "tier_records")
+data class DifficultyRecordEntity(
+    @PrimaryKey val tierOrdinal: Int,
+    val bestTimeMs: Long,
+    val bestLevelNumber: Int,
+    val updatedAtMs: Long
 )

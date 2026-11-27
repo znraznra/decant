@@ -53,6 +53,7 @@ import com.example.R
 import com.example.data.local.LevelProgressEntity
 import com.example.domain.DifficultyTier
 import com.example.domain.PuzzleEngine
+import com.example.domain.formatElapsedDuration
 import com.example.ui.theme.StudioThemeSpec
 
 @Composable
@@ -61,6 +62,7 @@ fun LevelSelectScreen(
     currentLevel: Int,
     highestUnlockedLevel: Int,
     completedProgress: List<LevelProgressEntity>,
+    tierBestTimes: Map<DifficultyTier, Long> = emptyMap(),
     onSelectLevel: (Int) -> Unit,
     onBack: () -> Unit
 ) {
@@ -150,12 +152,18 @@ fun LevelSelectScreen(
                     )
                 )
                 DifficultyTier.entries.forEach { tier ->
+                    val tierBest = tierBestTimes[tier]
+                    val chipText = if (tierBest != null) {
+                        "${tier.label} • ${formatElapsedDuration(tierBest)}"
+                    } else {
+                        tier.label
+                    }
                     FilterChip(
                         selected = selectedTierFilter == tier,
                         onClick = {
                             selectedTierFilter = if (selectedTierFilter == tier) null else tier
                         },
-                        label = { Text(tier.label) },
+                        label = { Text(chipText) },
                         colors = FilterChipDefaults.filterChipColors(
                             selectedContainerColor = theme.accent,
                             selectedLabelColor = theme.onAccent

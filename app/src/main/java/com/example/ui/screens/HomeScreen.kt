@@ -75,7 +75,6 @@ import com.example.R
 import com.example.data.prefs.UserPreferences
 import com.example.domain.DailyChallengeCardSummary
 import com.example.domain.PuzzleEngine
-import com.example.domain.SyncStatus
 import com.example.ui.theme.StudioThemeSpec
 import com.example.ui.theme.StudioThemes
 import com.example.ui.viewmodel.GameBoardViewModel
@@ -96,7 +95,6 @@ fun HomeScreen(
     val preferences by viewModel.preferences.collectAsStateWithLifecycle()
     val completedProgress by viewModel.completedProgress.collectAsStateWithLifecycle()
     val dailySummary by viewModel.dailyChallengeSummary.collectAsStateWithLifecycle()
-    val syncStatus by viewModel.syncStatus.collectAsStateWithLifecycle()
     val theme = StudioThemes.get(uiState.activeTheme)
 
     val standardActiveLevel = if (uiState.isDailyChallenge) {
@@ -109,7 +107,6 @@ fun HomeScreen(
         uiState = uiState,
         preferences = preferences,
         dailySummary = dailySummary,
-        syncStatus = syncStatus,
         completedCount = completedProgress.count { it.isCompleted },
         standardActiveLevel = standardActiveLevel,
         highestUnlockedLevel = maxOf(preferences.highestUnlockedLevel, standardActiveLevel),
@@ -130,7 +127,6 @@ fun HomeScreenContent(
     uiState: GameUiState,
     preferences: UserPreferences,
     dailySummary: DailyChallengeCardSummary,
-    syncStatus: SyncStatus = SyncStatus.Disabled,
     completedCount: Int,
     standardActiveLevel: Int,
     highestUnlockedLevel: Int,
@@ -190,7 +186,6 @@ fun HomeScreenContent(
                 ) {
                     HeroHeaderSection(
                         theme = theme,
-                        syncStatus = syncStatus,
                         isCompactHeight = availableHeight < 560.dp
                     )
                     Spacer(modifier = Modifier.height(18.dp))
@@ -251,7 +246,6 @@ fun HomeScreenContent(
 
                     HeroHeaderSection(
                         theme = theme,
-                        syncStatus = syncStatus,
                         isCompactHeight = availableHeight < 680.dp
                     )
 
@@ -287,14 +281,13 @@ fun HomeScreenContent(
 @Composable
 private fun HeroHeaderSection(
     theme: StudioThemeSpec,
-    syncStatus: SyncStatus,
     isCompactHeight: Boolean
 ) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        PrivacyOfflineBadge(theme = theme, syncStatus = syncStatus)
+        PrivacyOfflineBadge(theme = theme)
 
         HeroBottlesShowcase(
             theme = theme,
@@ -320,15 +313,7 @@ private fun HeroHeaderSection(
 }
 
 @Composable
-private fun PrivacyOfflineBadge(
-    theme: StudioThemeSpec,
-    syncStatus: SyncStatus
-) {
-    val badgeText = if (syncStatus is SyncStatus.Synced) {
-        "Play Games Saved • Zero Tracking"
-    } else {
-        "Zero Tracking • No Permissions"
-    }
+private fun PrivacyOfflineBadge(theme: StudioThemeSpec) {
     Surface(
         color = theme.cardBackground,
         shape = CircleShape,
@@ -340,15 +325,13 @@ private fun PrivacyOfflineBadge(
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             Icon(
-                painter = painterResource(
-                    if (syncStatus is SyncStatus.Synced) R.drawable.ic_cloud_done else R.drawable.ic_shield_lock
-                ),
+                painter = painterResource(R.drawable.ic_shield_lock),
                 contentDescription = null,
                 tint = theme.tubeCompletedGlow,
                 modifier = Modifier.size(15.dp)
             )
             Text(
-                text = badgeText,
+                text = "100% Offline • Zero Tracking",
                 style = MaterialTheme.typography.labelMedium,
                 color = theme.textPrimary
             )

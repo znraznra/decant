@@ -18,8 +18,8 @@ data class UserPreferences(
     val hapticsEnabled: Boolean = true,
     val colorblindEnabled: Boolean = false,
     val randomizeThemePerLevel: Boolean = true,
+    val timerEnabled: Boolean = true,
     val pinnedTheme: StudioThemeId = StudioThemeId.CLEAN_GLASS,
-    val playGamesSyncEnabled: Boolean = true,
     val highestUnlockedLevel: Int = 1
 )
 
@@ -30,8 +30,8 @@ class UserPreferencesRepository(private val context: Context) {
         val HAPTICS_ENABLED = booleanPreferencesKey("haptics_enabled")
         val COLORBLIND_ENABLED = booleanPreferencesKey("colorblind_enabled")
         val RANDOMIZE_THEME = booleanPreferencesKey("randomize_theme_per_level")
+        val TIMER_ENABLED = booleanPreferencesKey("timer_enabled")
         val PINNED_THEME_ORDINAL = intPreferencesKey("pinned_theme_ordinal")
-        val PLAY_GAMES_SYNC_ENABLED = booleanPreferencesKey("play_games_sync_enabled")
         val HIGHEST_UNLOCKED_LEVEL = intPreferencesKey("highest_unlocked_level")
     }
 
@@ -43,8 +43,8 @@ class UserPreferencesRepository(private val context: Context) {
             hapticsEnabled = prefs[Keys.HAPTICS_ENABLED] ?: true,
             colorblindEnabled = prefs[Keys.COLORBLIND_ENABLED] ?: false,
             randomizeThemePerLevel = prefs[Keys.RANDOMIZE_THEME] ?: true,
+            timerEnabled = prefs[Keys.TIMER_ENABLED] ?: true,
             pinnedTheme = StudioThemeId.entries[themeOrdinal],
-            playGamesSyncEnabled = prefs[Keys.PLAY_GAMES_SYNC_ENABLED] ?: true,
             highestUnlockedLevel = (prefs[Keys.HIGHEST_UNLOCKED_LEVEL] ?: 1).coerceAtLeast(1)
         )
     }
@@ -65,12 +65,12 @@ class UserPreferencesRepository(private val context: Context) {
         context.dataStore.edit { it[Keys.RANDOMIZE_THEME] = enabled }
     }
 
-    suspend fun setPinnedTheme(theme: StudioThemeId) {
-        context.dataStore.edit { it[Keys.PINNED_THEME_ORDINAL] = theme.ordinal }
+    suspend fun setTimerEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.TIMER_ENABLED] = enabled }
     }
 
-    suspend fun setPlayGamesSyncEnabled(enabled: Boolean) {
-        context.dataStore.edit { it[Keys.PLAY_GAMES_SYNC_ENABLED] = enabled }
+    suspend fun setPinnedTheme(theme: StudioThemeId) {
+        context.dataStore.edit { it[Keys.PINNED_THEME_ORDINAL] = theme.ordinal }
     }
 
     suspend fun setHighestUnlockedLevel(level: Int) {
@@ -79,6 +79,12 @@ class UserPreferencesRepository(private val context: Context) {
             if (level > current) {
                 it[Keys.HIGHEST_UNLOCKED_LEVEL] = level
             }
+        }
+    }
+
+    suspend fun replaceHighestUnlockedLevel(level: Int) {
+        context.dataStore.edit {
+            it[Keys.HIGHEST_UNLOCKED_LEVEL] = level.coerceAtLeast(1)
         }
     }
 }

@@ -37,6 +37,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.windowsizeclass.WindowWidthSizeClass
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
@@ -52,19 +53,21 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
-import android.app.Activity
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.data.prefs.UserPreferences
 import com.example.domain.PuzzleEngine
+import com.example.domain.formatElapsedDuration
 import com.example.ui.components.GestureTutorialOverlay
 import com.example.ui.components.PhoneBottomActionDock
 import com.example.ui.components.StuckBanner
@@ -93,7 +96,25 @@ fun GameBoardScreen(
     val preferences by viewModel.preferences.collectAsStateWithLifecycle()
     val dailySummary by viewModel.dailyChallengeSummary.collectAsStateWithLifecycle()
     val theme = StudioThemes.get(uiState.activeTheme)
-    val activity = LocalContext.current as? Activity
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    DisposableEffect(lifecycleOwner, viewModel) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> viewModel.setBoardActive(true)
+                Lifecycle.Event.ON_PAUSE -> viewModel.setBoardActive(false)
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+            viewModel.setBoardActive(true)
+        }
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            viewModel.setBoardActive(false)
+        }
+    }
 
     GameBoardContent(
         uiState = uiState,
@@ -101,7 +122,7 @@ fun GameBoardScreen(
         dailyStreak = dailySummary.currentStreak,
         theme = theme,
         widthSizeClass = widthSizeClass,
-        onTubeClick = { idx -> viewModel.onTubeClick(idx, activity) },
+        onTubeClick = viewModel::onTubeClick,
         onUndoClick = viewModel::onUndoClick,
         onRestartClick = viewModel::restartLevel,
         onAddExtraTubeClick = viewModel::onAddExtraTubeClick,
@@ -175,6 +196,7 @@ fun GameBoardContent(
                 ) {
                     CompactTopHeader(
                         uiState = uiState,
+                        timerEnabled = preferences.timerEnabled,
                         theme = theme,
                         showNavActions = false,
                         onShuffleThemeClick = onShuffleThemeClick,
@@ -226,6 +248,7 @@ fun GameBoardContent(
             ) {
                 CompactTopHeader(
                     uiState = uiState,
+                    timerEnabled = preferences.timerEnabled,
                     theme = theme,
                     showNavActions = true,
                     onShuffleThemeClick = onShuffleThemeClick,
@@ -275,6 +298,11 @@ fun GameBoardContent(
                 levelNumber = uiState.levelNumber,
                 moveCount = uiState.moveCount,
                 isNewBest = uiState.isNewBestMoves,
+                isNewBestTime = uiState.isNewBestTime,
+                timerEnabled = preferences.timerEnabled,
+                elapsedTimeMs = uiState.elapsedTimeMs,
+                bestTierTimeMs = uiState.bestTierTimeMs,
+                tierLabel = uiState.tier.label,
                 isDailyChallenge = uiState.isDailyChallenge,
                 dailyDisplayDate = uiState.dailyDisplayDate,
                 dailyStreak = dailyStreak,
@@ -289,6 +317,7 @@ fun GameBoardContent(
 @Composable
 private fun CompactTopHeader(
     uiState: GameUiState,
+    timerEnabled: Boolean,
     theme: StudioThemeSpec,
     showNavActions: Boolean,
     onShuffleThemeClick: () -> Unit,
@@ -350,12 +379,41 @@ private fun CompactTopHeader(
                         }
                     }
                     Text(
-                        text = "${uiState.colorCount} colors • ${uiState.tubes.size} tubes • ${uiState.moveCount} moves",
+                        text = buildString {
+                            append("${uiState.colorCount} colors • ${uiState.tubes.size} tubes • ${uiState.moveCount} moves")
+                        },
                         style = MaterialTheme.typography.labelSmall,
                         color = theme.textSecondary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
+                    if (timerEnabled) {
+                        val currentTime = formatElapsedDuration(uiState.elapsedTimeMs)
+                        val bestText = uiState.bestTierTimeMs?.let { best ->
+                            " • Best ${formatElapsedDuration(best)}"
+                        }.orEmpty()
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            modifier = Modifier.testTag("level_timer_label")
+                        ) {
+                            Icon(
+                                painter = painterResource(R.drawable.ic_timer),
+                                contentDescription = null,
+                                tint = theme.textSecondary.copy(alpha = 0.78f),
+                                modifier = Modifier.size(12.dp)
+                            )
+                            Text(
+                                text = "$currentTime$bestText",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontFeatureSettings = "tnum"
+                                ),
+                                color = theme.textSecondary.copy(alpha = 0.88f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
                 }
             }
         }

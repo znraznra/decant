@@ -1,33 +1,42 @@
 package com.example.ui.viewmodel
 
-import android.app.Activity
+import android.content.Context
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.audio.SoundFeedback
 import com.example.data.GameProgressStore
+import com.example.data.ProgressRepository
 import com.example.data.local.DailyChallengeEntity
 import com.example.data.local.LevelProgressEntity
 import com.example.data.prefs.UserPreferences
+import com.example.data.transfer.PeerTransferEngine
 import com.example.domain.DailyChallengeCardSummary
 import com.example.domain.DifficultyTier
+import com.example.domain.DiscoveredPeer
+import com.example.domain.ImportSummary
 import com.example.domain.LevelDifficultySpec
 import com.example.domain.LevelSpec
 import com.example.domain.MAX_UNDO_PER_STAGE
 import com.example.domain.PourAnimationState
 import com.example.domain.PourMove
+import com.example.domain.ProgressTransferPayload
 import com.example.domain.PuzzleEngine
 import com.example.domain.StudioThemeId
-import com.example.domain.SyncStatus
 import com.example.domain.TUBE_CAPACITY
+import com.example.domain.TransferTransport
+import com.example.domain.TransferUiState
 import com.example.domain.TubeModel
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -52,6 +61,9 @@ data class GameUiState(
     val extraTubeUsed: Boolean = false,
     val isLevelComplete: Boolean = false,
     val isNewBestMoves: Boolean = false,
+    val isNewBestTime: Boolean = false,
+    val elapsedTimeMs: Long = 0L,
+    val bestTierTimeMs: Long? = null,
     val hasValidMovesLeft: Boolean = true,
     val pourAnimation: PourAnimationState? = null,
     val isDailyChallenge: Boolean = false,
@@ -65,9 +77,11 @@ data class GameUiState(
 class GameBoardViewModel(
     private val repository: GameProgressStore,
     private val soundEngine: SoundFeedback,
+    private val peerTransferEngine: PeerTransferEngine? = null,
     private val pourAnimationDurationMs: Long = 260L,
     private val computationDispatcher: CoroutineDispatcher = Dispatchers.Default,
-    private val dateProvider: () -> String = { PuzzleEngine.currentLocalDateKey() }
+    private val dateProvider: () -> String = { PuzzleEngine.currentLocalDateKey() },
+    private val clockMsProvider: () -> Long = { System.currentTimeMillis() }
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(GameUiState())
@@ -85,6 +99,23 @@ class GameBoardViewModel(
         initialValue = emptyList()
     )
 
+    val tierBestTimes: StateFlow<Map<DifficultyTier, Long>> = repository.allTierRecordsFlow
+        .map { records ->
+            buildMap {
+                for (record in records) {
+                    val tier = DifficultyTier.entries.getOrNull(record.tierOrdinal)
+                    if (tier != null && record.bestTimeMs > 0L) {
+                        put(tier, record.bestTimeMs)
+                    }
+                }
+            }
+        }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = emptyMap()
+        )
+
     val dailyChallengeSummary: StateFlow<DailyChallengeCardSummary> =
         repository.allDailyChallengesFlow
             .map { entries -> buildDailySummary(entries) }
@@ -94,7 +125,19 @@ class GameBoardViewModel(
                 initialValue = buildDailySummary(emptyList())
             )
 
-    val syncStatus: StateFlow<SyncStatus> = repository.syncStatus
+    private val fallbackTransferState = MutableStateFlow<TransferUiState>(TransferUiState.Idle)
+    val transferUiState: StateFlow<TransferUiState> =
+        peerTransferEngine?.transferState ?: fallbackTransferState.asStateFlow()
+
+    private val fallbackPeers = MutableStateFlow<List<DiscoveredPeer>>(emptyList())
+    val discoveredPeers: StateFlow<List<DiscoveredPeer>> =
+        peerTransferEngine?.discoveredPeers ?: fallbackPeers.asStateFlow()
+
+    private val _fileBackupFeedback = MutableStateFlow<String?>(null)
+    val fileBackupFeedback: StateFlow<String?> = _fileBackupFeedback.asStateFlow()
+
+    private val _pendingBackupPreview = MutableStateFlow<ProgressTransferPayload?>(null)
+    val pendingBackupPreview: StateFlow<ProgressTransferPayload?> = _pendingBackupPreview.asStateFlow()
 
     private var hasInitialized = false
     private var initialLevelNumber: Int = 0
@@ -102,8 +145,28 @@ class GameBoardViewModel(
     private var initialDailyDateKey: String? = null
     private var initialDailyTubes: List<TubeModel> = emptyList()
 
+    private var timerJob: Job? = null
+    private var isBoardForegrounded: Boolean = false
+
     init {
         initializeSession()
+        observeTimerPreference()
+    }
+
+    private fun observeTimerPreference() {
+        viewModelScope.launch {
+            preferences
+                .map { it.timerEnabled }
+                .distinctUntilChanged()
+                .collect { enabled ->
+                    if (enabled) {
+                        syncTimerLoop()
+                    } else {
+                        timerJob?.cancel()
+                        timerJob = null
+                    }
+                }
+        }
     }
 
     private fun buildDailySummary(entries: List<DailyChallengeEntity>): DailyChallengeCardSummary {
@@ -136,6 +199,13 @@ class GameBoardViewModel(
         }
     }
 
+    private suspend fun lookupBestTierTime(tier: DifficultyTier): Long? {
+        tierBestTimes.value[tier]?.let { return it }
+        return repository.allTierRecordsFlow.first()
+            .firstOrNull { it.tierOrdinal == tier.ordinal && it.bestTimeMs > 0L }
+            ?.bestTimeMs
+    }
+
     private suspend fun loadStandardSessionInternal() {
         val prefs = repository.preferencesFlow.first()
         val savedSession = repository.loadActiveSession()
@@ -151,6 +221,7 @@ class GameBoardViewModel(
                 reconstructInitialTubes(savedSession.tubes, savedSession.undoStack, savedSession.extraTubeUsed)
             }
             val solved = PuzzleEngine.isLevelSolved(savedSession.tubes)
+            val bestTierTime = lookupBestTierTime(tier)
             _uiState.value = GameUiState(
                 isLoading = false,
                 levelNumber = savedSession.currentLevel,
@@ -163,13 +234,51 @@ class GameBoardViewModel(
                 moveCount = savedSession.moveCount,
                 extraTubeUsed = savedSession.extraTubeUsed,
                 isLevelComplete = solved,
+                elapsedTimeMs = savedSession.elapsedTimeMs.coerceAtLeast(0L),
+                bestTierTimeMs = bestTierTime,
                 hasValidMovesLeft = solved || PuzzleEngine.hasAnyValidMoves(savedSession.tubes),
                 isDailyChallenge = false,
                 dailyDateKey = null,
                 dailyDisplayDate = ""
             )
+            syncTimerLoop()
         } else {
             loadLevelInternal(prefs.highestUnlockedLevel.coerceAtLeast(1), prefs)
+        }
+    }
+
+    fun setBoardActive(active: Boolean) {
+        if (isBoardForegrounded == active) return
+        isBoardForegrounded = active
+        if (active) {
+            syncTimerLoop()
+        } else {
+            timerJob?.cancel()
+            timerJob = null
+            viewModelScope.launch { persistActiveBoard() }
+        }
+    }
+
+    private fun syncTimerLoop() {
+        timerJob?.cancel()
+        timerJob = null
+        val state = _uiState.value
+        if (!isBoardForegrounded || !preferences.value.timerEnabled || state.isLoading || state.isLevelComplete) {
+            return
+        }
+        timerJob = viewModelScope.launch {
+            var lastTickMs = clockMsProvider()
+            while (true) {
+                delay(1000L)
+                val nowMs = clockMsProvider()
+                val delta = (nowMs - lastTickMs).coerceIn(0L, 2500L)
+                lastTickMs = nowMs
+                val snap = _uiState.value
+                if (!isBoardForegrounded || !preferences.value.timerEnabled || snap.isLoading || snap.isLevelComplete) {
+                    break
+                }
+                _uiState.update { it.copy(elapsedTimeMs = it.elapsedTimeMs + delta) }
+            }
         }
     }
 
@@ -216,6 +325,7 @@ class GameBoardViewModel(
             initialDailyTubes = snapshot.initialTubes
             val theme = if (prefs.randomizeThemePerLevel) snapshot.theme else prefs.pinnedTheme
             val boardSolved = PuzzleEngine.isLevelSolved(snapshot.currentTubes)
+            val bestTierTime = lookupBestTierTime(snapshot.tier)
             _uiState.value = GameUiState(
                 isLoading = false,
                 levelNumber = 0,
@@ -232,11 +342,15 @@ class GameBoardViewModel(
                 extraTubeUsed = snapshot.extraTubeUsed,
                 isLevelComplete = boardSolved,
                 isNewBestMoves = false,
+                isNewBestTime = false,
+                elapsedTimeMs = snapshot.elapsedTimeMs.coerceAtLeast(0L),
+                bestTierTimeMs = bestTierTime,
                 hasValidMovesLeft = boardSolved || PuzzleEngine.hasAnyValidMoves(snapshot.currentTubes),
                 isDailyChallenge = true,
                 dailyDateKey = snapshot.dateKey,
                 dailyDisplayDate = PuzzleEngine.formatDisplayDate(snapshot.dateKey)
             )
+            syncTimerLoop()
         }
     }
 
@@ -253,6 +367,7 @@ class GameBoardViewModel(
         initialLevelNumber = spec.levelNumber
         initialLevelTubes = spec.tubes
         val theme = if (prefs.randomizeThemePerLevel) spec.defaultTheme else prefs.pinnedTheme
+        val bestTierTime = lookupBestTierTime(spec.tier)
         _uiState.value = GameUiState(
             isLoading = false,
             levelNumber = spec.levelNumber,
@@ -269,15 +384,19 @@ class GameBoardViewModel(
             extraTubeUsed = false,
             isLevelComplete = false,
             isNewBestMoves = false,
+            isNewBestTime = false,
+            elapsedTimeMs = 0L,
+            bestTierTimeMs = bestTierTime,
             hasValidMovesLeft = true,
             isDailyChallenge = false,
             dailyDateKey = null,
             dailyDisplayDate = ""
         )
         persistActiveBoard()
+        syncTimerLoop()
     }
 
-    fun onTubeClick(index: Int, activity: Activity? = null) {
+    fun onTubeClick(index: Int) {
         val state = _uiState.value
         if (state.isLoading || state.isLevelComplete || state.pourAnimation != null) return
         if (index !in state.tubes.indices) return
@@ -321,6 +440,7 @@ class GameBoardViewModel(
             return
         }
 
+        val targetHadLiquid = !state.tubes[index].isEmpty
         executeAnimatedPour(
             fromIndex = selected,
             toIndex = index,
@@ -331,7 +451,7 @@ class GameBoardViewModel(
             newRemainingUndos = state.remainingUndos,
             newMoveCount = state.moveCount + 1,
             isReverse = false,
-            activity = activity
+            targetHadLiquid = targetHadLiquid
         )
     }
 
@@ -353,7 +473,8 @@ class GameBoardViewModel(
             updatedUndo = state.undoStack.dropLast(1),
             newRemainingUndos = (state.remainingUndos - 1).coerceAtLeast(0),
             newMoveCount = (state.moveCount - 1).coerceAtLeast(0),
-            isReverse = true
+            isReverse = true,
+            targetHadLiquid = false
         )
     }
 
@@ -374,7 +495,7 @@ class GameBoardViewModel(
         newRemainingUndos: Int,
         newMoveCount: Int,
         isReverse: Boolean,
-        activity: Activity? = null
+        targetHadLiquid: Boolean
     ) {
         val prefs = preferences.value
         if (!isReverse) {
@@ -404,7 +525,6 @@ class GameBoardViewModel(
                 for (step in 1..totalSteps) {
                     delay(frameStepMs)
                     val linear = step.toFloat() / totalSteps.toFloat()
-                    // Smooth cubic ease-in-out
                     val eased = if (linear < 0.5f) {
                         4f * linear * linear * linear
                     } else {
@@ -416,18 +536,40 @@ class GameBoardViewModel(
                 }
             }
 
+            if (!isReverse && targetHadLiquid) {
+                soundEngine.playColorMix(colorId, units, prefs.soundEnabled, prefs.hapticsEnabled)
+            }
+
             val solved = PuzzleEngine.isLevelSolved(targetTubes)
             val movesLeft = solved || PuzzleEngine.hasAnyValidMoves(targetTubes)
 
-            var isNewBest = false
+            var isNewBestMoves = false
+            var isNewBestTime = false
             val currentSnapshot = _uiState.value
+            var updatedBestTierTime = currentSnapshot.bestTierTimeMs
             if (solved) {
-                soundEngine.playVictory(prefs.soundEnabled, prefs.hapticsEnabled)
-                isNewBest = if (currentSnapshot.isDailyChallenge) {
-                    val key = currentSnapshot.dailyDateKey
-                    if (key != null) repository.markDailyChallengeCompleted(key, newMoveCount) else false
+                timerJob?.cancel()
+                timerJob = null
+                soundEngine.playLevelComplete(prefs.soundEnabled, prefs.hapticsEnabled)
+                val trackedTimeMs = if (prefs.timerEnabled) {
+                    currentSnapshot.elapsedTimeMs.coerceAtLeast(1000L)
                 } else {
-                    repository.markLevelCompleted(currentSnapshot.levelNumber, newMoveCount)
+                    0L
+                }
+                val result = if (currentSnapshot.isDailyChallenge) {
+                    val key = currentSnapshot.dailyDateKey
+                    if (key != null) {
+                        repository.markDailyChallengeCompleted(key, newMoveCount, trackedTimeMs)
+                    } else {
+                        null
+                    }
+                } else {
+                    repository.markLevelCompleted(currentSnapshot.levelNumber, newMoveCount, trackedTimeMs)
+                }
+                if (result != null) {
+                    isNewBestMoves = result.isNewBestMoves
+                    isNewBestTime = result.isNewBestTime
+                    updatedBestTierTime = result.bestTierTimeMs ?: updatedBestTierTime
                 }
             }
 
@@ -439,15 +581,14 @@ class GameBoardViewModel(
                     moveCount = newMoveCount,
                     pourAnimation = null,
                     isLevelComplete = solved,
-                    isNewBestMoves = isNewBest,
+                    isNewBestMoves = isNewBestMoves,
+                    isNewBestTime = isNewBestTime,
+                    bestTierTimeMs = updatedBestTierTime,
                     hasValidMovesLeft = movesLeft
                 )
             }
 
             persistActiveBoard()
-            if (solved && activity != null && preferences.value.playGamesSyncEnabled) {
-                repository.syncWithCloudIfEnabled(activity, interactiveSignIn = false)
-            }
         }
     }
 
@@ -473,6 +614,7 @@ class GameBoardViewModel(
             }
             applyInitialReset(resetTubes)
             viewModelScope.launch { persistActiveBoard() }
+            syncTimerLoop()
             return
         }
 
@@ -486,6 +628,7 @@ class GameBoardViewModel(
         }
         applyInitialReset(resetTubes)
         viewModelScope.launch { persistActiveBoard() }
+        syncTimerLoop()
     }
 
     private fun reconstructInitialTubes(
@@ -513,6 +656,8 @@ class GameBoardViewModel(
                 extraTubeUsed = false,
                 isLevelComplete = false,
                 isNewBestMoves = false,
+                isNewBestTime = false,
+                elapsedTimeMs = 0L,
                 hasValidMovesLeft = PuzzleEngine.hasAnyValidMoves(resetTubes)
             )
         }
@@ -582,6 +727,12 @@ class GameBoardViewModel(
         }
     }
 
+    fun setTimerEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            repository.setTimerEnabled(enabled)
+        }
+    }
+
     fun setPinnedTheme(theme: StudioThemeId) {
         viewModelScope.launch {
             repository.setPinnedTheme(theme)
@@ -591,33 +742,91 @@ class GameBoardViewModel(
         }
     }
 
-    fun onAppResumeSync(activity: Activity) {
-        if (!preferences.value.playGamesSyncEnabled) return
-        if (syncStatus.value == SyncStatus.Syncing) return
+    fun exportBackupForShare(context: Context, onReady: (Uri) -> Unit) {
+        val repo = repository as? ProgressRepository ?: return
         viewModelScope.launch {
-            val updated = repository.syncWithCloudIfEnabled(activity, interactiveSignIn = false)
-            if (updated) refreshUnstartedBoardAfterCloudSync()
+            runCatching { repo.writeBackupToShareFile(context) }
+                .onSuccess { uri ->
+                    _fileBackupFeedback.value = "JSON backup ready to save or share."
+                    onReady(uri)
+                }
+                .onFailure { err ->
+                    _fileBackupFeedback.value = err.localizedMessage ?: "Failed to create JSON backup."
+                }
         }
     }
 
-    fun triggerManualCloudSync(activity: Activity) {
+    fun previewBackupFromUri(context: Context, uri: Uri) {
+        val repo = repository as? ProgressRepository ?: return
         viewModelScope.launch {
-            val updated = repository.syncWithCloudIfEnabled(activity, interactiveSignIn = true)
-            if (updated) refreshUnstartedBoardAfterCloudSync()
+            repo.parseBackupFromUri(context, uri)
+                .onSuccess { payload ->
+                    _pendingBackupPreview.value = payload
+                }
+                .onFailure { err ->
+                    _pendingBackupPreview.value = null
+                    _fileBackupFeedback.value = err.localizedMessage ?: "Invalid Decant! JSON backup file."
+                }
         }
     }
 
-    fun setPlayGamesSyncEnabled(enabled: Boolean, activity: Activity? = null) {
+    fun confirmReplaceWithPendingBackup() {
+        val payload = _pendingBackupPreview.value ?: return
+        _pendingBackupPreview.value = null
         viewModelScope.launch {
-            repository.setPlayGamesSyncEnabled(enabled)
-            if (enabled && activity != null) {
-                val updated = repository.syncWithCloudIfEnabled(activity, interactiveSignIn = true)
-                if (updated) refreshUnstartedBoardAfterCloudSync()
-            }
+            val summary = replaceWithBackupPayloadDirectly(payload)
+            _fileBackupFeedback.value =
+                "Database replaced! Restored ${summary.newLevelsAdded} levels, ${summary.newDailyAdded} dailies (Lv. ${summary.highestUnlockedLevel})."
         }
     }
 
-    private suspend fun refreshUnstartedBoardAfterCloudSync() {
+    fun dismissPendingBackupPreview() {
+        _pendingBackupPreview.value = null
+    }
+
+    suspend fun replaceWithBackupPayloadDirectly(payload: ProgressTransferPayload): ImportSummary {
+        val summary = repository.replaceWithBackupPayload(payload)
+        loadStandardSessionInternal()
+        return summary
+    }
+
+    suspend fun importPayloadDirectly(payload: ProgressTransferPayload): ImportSummary {
+        val summary = repository.importBackupPayload(payload)
+        refreshUnstartedBoardAfterImport()
+        return summary
+    }
+
+    fun clearFileBackupFeedback() {
+        _fileBackupFeedback.value = null
+    }
+
+    fun startPeerReceive(transport: TransferTransport) {
+        peerTransferEngine?.startReceiving(transport) { payload ->
+            val summary = repository.importBackupPayload(payload)
+            refreshUnstartedBoardAfterImport()
+            summary
+        }
+    }
+
+    fun startPeerDiscovery(transport: TransferTransport) {
+        peerTransferEngine?.startDiscovering(transport)
+    }
+
+    fun sendProgressToPeer(peer: DiscoveredPeer) {
+        peerTransferEngine?.sendToPeer(peer) {
+            repository.exportBackupPayload()
+        }
+    }
+
+    fun stopPeerTransfer() {
+        peerTransferEngine?.stopAll()
+    }
+
+    fun resetTransferState() {
+        peerTransferEngine?.resetState()
+    }
+
+    private suspend fun refreshUnstartedBoardAfterImport() {
         val state = _uiState.value
         if (!state.isDailyChallenge && state.moveCount == 0 && !state.isLevelComplete) {
             val latestPrefs = repository.preferencesFlow.first()
@@ -639,7 +848,8 @@ class GameBoardViewModel(
                 undoStack = state.undoStack,
                 remainingUndos = state.remainingUndos,
                 extraTubeUsed = state.extraTubeUsed,
-                moveCount = state.moveCount
+                moveCount = state.moveCount,
+                elapsedTimeMs = state.elapsedTimeMs
             )
         } else {
             repository.saveActiveSession(
@@ -650,18 +860,30 @@ class GameBoardViewModel(
                 remainingUndos = state.remainingUndos,
                 extraTubeUsed = state.extraTubeUsed,
                 moveCount = state.moveCount,
-                initialTubes = if (initialLevelNumber == state.levelNumber) initialLevelTubes else emptyList()
+                initialTubes = if (initialLevelNumber == state.levelNumber) initialLevelTubes else emptyList(),
+                elapsedTimeMs = state.elapsedTimeMs
             )
         }
     }
 
+    override fun onCleared() {
+        timerJob?.cancel()
+        peerTransferEngine?.stopAll()
+        super.onCleared()
+    }
+
     class Factory(
         private val repository: GameProgressStore,
-        private val soundEngine: SoundFeedback
+        private val soundEngine: SoundFeedback,
+        private val peerTransferEngine: PeerTransferEngine? = null
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
-            return GameBoardViewModel(repository, soundEngine) as T
+            return GameBoardViewModel(
+                repository = repository,
+                soundEngine = soundEngine,
+                peerTransferEngine = peerTransferEngine
+            ) as T
         }
     }
 }
