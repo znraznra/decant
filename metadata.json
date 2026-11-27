@@ -1,0 +1,6 @@
+{
+  "name": "Decant!",
+  "description": "Decant! — Water Sort puzzle game with progressive difficulty, gesture onboarding, confetti celebration, and optional Google Play Games save/load.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
